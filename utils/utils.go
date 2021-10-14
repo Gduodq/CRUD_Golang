@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"crud-golang/bookStruct"
 	"crud-golang/errorStruct"
 	"encoding/json"
@@ -9,15 +10,23 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type urlHandleFunc func(res http.ResponseWriter, req *http.Request) (errorStruct.Error, bool)
 
-func CreateBaseBook(actualId *int, bookMap map[string]bookStruct.Book) {
-	idToString := strconv.Itoa(*actualId)
-	bookMap[idToString] = bookStruct.Book{ID: idToString, Title: "Harry Potter", Subtitle: "", AuthorName: "J.K.Rowling", ReleaseDate: time.Now().UTC().String(), Price: 10.00, CreatedAt: time.Now().UTC().String()}
-	*actualId++
+var GetID = uuid.New().String
+
+var MongoConnTimeout = 5 * time.Second
+
+func CreateBaseBook(collection *mongo.Collection, ctx context.Context) {
+	book := bookStruct.Book{ID: "3f082af6-d773-4350-9854-1327c91211c7", Title: "Harry Potter", AuthorName: "J.K.Rowling", ReleaseDate: time.Now().UTC().String(), Price: 10.00}
+	if _, err := collection.InsertOne(ctx, book); err != nil {
+		log.Println("The base book could not be created, skipping the creation")
+	}
 }
 
 func InitializeQueryNumber(queryParams map[string][]string, key string, defaultValue int) int {
@@ -38,10 +47,8 @@ func GetBookDataFromReq(req *http.Request, newBook *bookStruct.Book) error {
 	return err
 }
 
-func DefaultBookAttributes(book *bookStruct.Book, actualId *int) {
-	book.ID = strconv.Itoa(*actualId)
-	book.CreatedAt = time.Now().UTC().String()
-	*actualId++
+func DefaultBookAttributes(book *bookStruct.Book) {
+	book.ID = GetID()
 }
 
 func GetReqParam(req *http.Request, key string) string {
@@ -64,4 +71,18 @@ func BaseUrlHandler(handleFunc urlHandleFunc) func(res http.ResponseWriter, req 
 		}
 	}
 	return handlerFuncReturn
+}
+
+func ConnectToDB(mongoDBURI string, booksCollection *mongo.Collection) {
+	log.Println("Connecting to MongoDB instance on URI " + mongoDBURI)
+	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(mongoDBURI))
+	if err != nil {
+		log.Println("The API could not connect to the MongoDB instance and can't start up")
+		panic(err)
+	}
+	log.Println("Successfully connected")
+	booksCollection = client.Database(`booksGolang`).Collection(`books`)
+	ctx, cancel := context.WithTimeout(context.Background(), MongoConnTimeout)
+	defer cancel()
+	CreateBaseBook(booksCollection, ctx)
 }

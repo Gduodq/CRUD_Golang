@@ -1,11 +1,9 @@
 package bookStruct
 
 type Book struct {
-	ID          string  `json:"id"`
-	Title       string  `json:"title"`
-	Subtitle    string  `json:"subtitle"`
-	AuthorName  string  `json:"authorName"`
-	ReleaseDate string  `json:"releaseDate"`
-	Price       float32 `json:"price"`
-	CreatedAt   string  `json:"createdAt"`
+	ID          string  `json:"id" bson:"_id,omitempty"`
+	Title       string  `json:"title" bson:"title,omitempty"`
+	AuthorName  string  `json:"authorName" bson:"authorName,omitempty"`
+	ReleaseDate string  `json:"releaseDate" bson:"releaseDate,omitempty"`
+	Price       float32 `json:"price" bson:"price,omitempty"`
 }

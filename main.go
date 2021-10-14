@@ -1,122 +1,179 @@
 package main
 
 import (
+	"context"
 	"crud-golang/bookStruct"
 	"crud-golang/errorStruct"
 	"crud-golang/utils"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 
+	"github.com/joho/godotenv"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+
 	"github.com/gorilla/mux"
 )
 
-var bookMap = make(map[string]bookStruct.Book)
-
-var id int = 1
+var booksCollection *mongo.Collection
 
 func getBooks(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
 	queryParams := req.URL.Query()
-	limit := utils.InitializeQueryNumber(queryParams, "limit", len(bookMap))
+	limit := utils.InitializeQueryNumber(queryParams, "limit", 0)
 	skip := utils.InitializeQueryNumber(queryParams, "skip", 0)
-	startIdx := skip
-	endIdx := skip + limit
-	data := make([]bookStruct.Book, 0, limit)
-	idx := 0
-	for _, book := range bookMap {
-		if idx >= startIdx && idx < endIdx {
-			data = append(data, book)
-		}
-		idx++
+	opts := options.Find()
+	if limit > 0 {
+		opts.SetLimit(int64(limit))
+	}
+	if skip > 0 {
+		opts.SetSkip(int64(skip))
+	}
+	var booksFound []bookStruct.Book
+	ctx, cancel := context.WithTimeout(req.Context(), utils.MongoConnTimeout)
+	defer cancel()
+	findCursor, err := booksCollection.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		urlError = errorStruct.InternalError()
+	}
+	if err = findCursor.All(ctx, &booksFound); err != nil {
+		urlError = errorStruct.InternalError()
 	}
 	res.WriteHeader(http.StatusOK)
-	json.NewEncoder(res).Encode(data)
+	json.NewEncoder(res).Encode(booksFound)
 	return
 }
 
 func getBook(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
 	bookId := utils.GetReqParam(req, "bookId")
-	book, bookExists := bookMap[bookId]
-	if !bookExists {
-		utils.SetUrlError(&urlError, http.StatusNotFound, `{"error":"Book not found"}`)
+	var book bookStruct.Book
+	ctx, cancel := context.WithTimeout(req.Context(), utils.MongoConnTimeout)
+	defer cancel()
+	if err := booksCollection.FindOne(ctx, bson.M{"_id": bookId}).Decode(&book); err != nil {
+		if err == mongo.ErrNoDocuments {
+			urlError = errorStruct.NotFoundError()
+		} else {
+			urlError = errorStruct.InternalError()
+		}
 		hasError = true
 		return
-	} else {
-		res.WriteHeader(http.StatusOK)
-		json.NewEncoder(res).Encode(book)
 	}
+	res.WriteHeader(http.StatusOK)
+	json.NewEncoder(res).Encode(book)
 	return
 }
 
 func createBook(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
 	var newBook bookStruct.Book
-	err := utils.GetBookDataFromReq(req, &newBook)
-	if err != nil {
-		utils.SetUrlError(&urlError, http.StatusBadRequest, `{"error":"Data informed doesn't match the contract"}`)
+	if err := utils.GetBookDataFromReq(req, &newBook); err != nil {
+		urlError = errorStruct.WrongContractError()
 		hasError = true
 		return
 	}
-	utils.DefaultBookAttributes(&newBook, &id)
-	bookMap[newBook.ID] = newBook
+	utils.DefaultBookAttributes(&newBook)
+	ctx, cancel := context.WithTimeout(req.Context(), utils.MongoConnTimeout)
+	defer cancel()
+	if _, err := booksCollection.InsertOne(ctx, newBook); err != nil {
+		urlError = errorStruct.InternalError()
+		hasError = true
+		return
+	}
 	res.WriteHeader(http.StatusOK)
 	json.NewEncoder(res).Encode(newBook)
 	return
 }
 
-func updateBook(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
+func replaceBook(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
 	bookId := utils.GetReqParam(req, "bookId")
-	_, bookExists := bookMap[bookId]
-	if !bookExists {
-		utils.SetUrlError(&urlError, http.StatusNotFound, `{"error":"Book not found"}`)
+	var newBook bookStruct.Book
+	if err := utils.GetBookDataFromReq(req, &newBook); err != nil {
+		urlError = errorStruct.WrongContractError()
 		hasError = true
 		return
-	} else {
-		var newBook bookStruct.Book
-		err := utils.GetBookDataFromReq(req, &newBook)
-		if err != nil {
-			utils.SetUrlError(&urlError, http.StatusBadRequest, `{"error":"Data informed doesn't match the contract"}`)
-			hasError = true
-			return
-		}
-		newBook.ID = bookId
-		bookMap[bookId] = newBook
-		res.WriteHeader(http.StatusOK)
-		json.NewEncoder(res).Encode(newBook)
 	}
+	newBook.ID = bookId
+	ctx, cancel := context.WithTimeout(req.Context(), utils.MongoConnTimeout)
+	defer cancel()
+	err := booksCollection.FindOneAndReplace(ctx, bson.M{"_id": bookId}, newBook).Decode(&bookStruct.Book{})
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			urlError = errorStruct.NotFoundError()
+		} else {
+			urlError = errorStruct.InternalError()
+		}
+		hasError = true
+		return
+	}
+	res.WriteHeader(http.StatusOK)
+	json.NewEncoder(res).Encode(newBook)
 	return
 }
 
 func deleteBook(res http.ResponseWriter, req *http.Request) (urlError errorStruct.Error, hasError bool) {
 	bookId := utils.GetReqParam(req, "bookId")
-	book, bookExists := bookMap[bookId]
-	if !bookExists {
-		utils.SetUrlError(&urlError, http.StatusNotFound, `{"error":"Book not found"}`)
+	var book bookStruct.Book
+	ctx, cancel := context.WithTimeout(req.Context(), utils.MongoConnTimeout)
+	defer cancel()
+	err := booksCollection.FindOneAndDelete(ctx, bson.M{"_id": bookId}).Decode(&book)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			urlError = errorStruct.NotFoundError()
+		} else {
+			urlError = errorStruct.InternalError()
+		}
 		hasError = true
 		return
-	} else {
-		res.WriteHeader(http.StatusOK)
-		json.NewEncoder(res).Encode(book)
-		delete(bookMap, bookId)
 	}
+	res.WriteHeader(http.StatusOK)
+	json.NewEncoder(res).Encode(book)
 	return
 }
 
-func main() {
-	commandLineArgs := os.Args[1:]
-	var PORT string
-	if len(commandLineArgs) > 0 {
-		PORT = commandLineArgs[0]
-	} else {
-		PORT = "8000"
+func initializeEnvVars(envVarsKeyDefault [][]string, envVarsPointers []*string) {
+	err := godotenv.Load(".env")
+	if err != nil {
+		log.Println("Error loading .env file")
 	}
-	log.Println("Starting the HTTP server on port " + PORT)
+	var envKeyValue string
+	for idx, envVarKeyDefault := range envVarsKeyDefault {
+		key := envVarKeyDefault[0]
+		defaultValue := envVarKeyDefault[1]
+		if value := os.Getenv(key); value != "" {
+			envKeyValue = value
+		} else {
+			envKeyValue = defaultValue
+		}
+		*envVarsPointers[idx] = envKeyValue
+	}
+}
+
+func startAPI(PORT string) {
+	log.Println("Starting the HTTP server...")
 	router := mux.NewRouter().StrictSlash(true)
-	utils.CreateBaseBook(&id, bookMap)
 	router.HandleFunc("/books", utils.BaseUrlHandler(getBooks)).Methods("GET")
 	router.HandleFunc("/books/{bookId}", utils.BaseUrlHandler(getBook)).Methods("GET")
 	router.HandleFunc("/books", utils.BaseUrlHandler(createBook)).Methods("POST")
-	router.HandleFunc("/books/{bookId}", utils.BaseUrlHandler(updateBook)).Methods("PUT")
+	router.HandleFunc("/books/{bookId}", utils.BaseUrlHandler(replaceBook)).Methods("PUT")
 	router.HandleFunc("/books/{bookId}", utils.BaseUrlHandler(deleteBook)).Methods("DELETE")
+	log.Println("HTTP server listening on port " + PORT)
 	log.Fatal(http.ListenAndServe(":"+PORT, router))
+}
+
+func main() {
+	var PORT, MONGOHOST, MONGOPORT, MONGOUSER, MONGOPASS string
+	envVarsKeyDefault := [][]string{{"PORT", "8000"}, {"MONGOHOST", "localhost"}, {"MONGOPORT", "27017"}, {"MONGOUSER", ""}, {"MONGOPASS", ""}}
+	envVarsPointers := []*string{&PORT, &MONGOHOST, &MONGOPORT, &MONGOUSER, &MONGOPASS}
+	initializeEnvVars(envVarsKeyDefault, envVarsPointers)
+	if MONGOUSER != "" {
+		MONGOUSER = MONGOUSER + ":"
+	}
+	if MONGOPASS != "" {
+		MONGOPASS = MONGOPASS + "@"
+	}
+	mongoDBURI := fmt.Sprintf(`mongodb://%v%v%v:%v`, MONGOUSER, MONGOPASS, MONGOHOST, MONGOPORT)
+	utils.ConnectToDB(mongoDBURI, booksCollection)
+	startAPI(PORT)
 }
